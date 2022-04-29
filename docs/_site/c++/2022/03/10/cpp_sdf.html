@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Rendering Signed distance functions, C++20 modules, no virtual stuff</title>
+  <meta name="description" content="Hello Signed Distance FunctionsAs mentioned in the previous post, I’ve implemented a little SDF (signed distance field) shape rendering library using some ne...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://froyo-np.github.io/c++/2022/03/10/cpp_sdf.html">
+  <link rel="alternate" type="application/rss+xml" title="FROYO" href="https://froyo-np.github.io/feed.xml">
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">FROYO</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+          <a class="page-link" href="/about/">About</a>
+          
+        
+          
+          <a class="page-link" href="/contact/">Contact</a>
+          
+        
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <article class="post" itemscope itemtype="http://schema.org/BlogPosting">
+
+  <header class="post-header">
+    <h1 class="post-title" itemprop="name headline">Rendering Signed distance functions, C++20 modules, no virtual stuff</h1>
+    <p class="post-meta"><time datetime="2022-03-10T13:28:49-08:00" itemprop="datePublished">Mar 10, 2022</time></p>
+  </header>
+
+  <div class="post-content" itemprop="articleBody">
+    <p><img src="/docs/_images/sdf_header.jpg" alt="shapes rendered via sdf" /></p>
+<h1 id="hello-signed-distance-functions">Hello Signed Distance Functions</h1>
+
+<p>As mentioned in the previous post, I’ve implemented a little SDF (signed distance field) shape rendering library using some new(er) features of c++20. I’m gonna walk through some of the decisions I made for this one, as there are a lot of decisions I made along the way that were a bit outside of my comfort zone.</p>
+
+<h2 id="sdf-refresher">SDF refresher</h2>
+<p>We have shapes, which define a simple math function that reports either the distance to a surface, or a bound on that distance. To render this, we march along rays from the camera origin until we hit a surface - a hit exists where SDF(shape, testPointOnRay) is near 0. 
+These shapes can be combined via intersection, subtraction, and simple union. they can also be modified by operations like smoothing or various transforms. A composite SDF object could be described by a tree, eg. BinaryOp(intersection, round(box(…), cone(…)).
+So! the overall structure of this little experiment is to produce a tree structure that supports combining these elements, and traversing them to determine the distance from a test point in 3D space to the surface of the compound object.
+I’ve written (and so have you, probably) recursive tree data structures before:
+template <typename T="">
+class treeNode {
+	T item;
+	vector&lt;treeNode<T>&gt; children;
+};</T></typename></p>
+
+<p>// the items then would be our SDF shapes / binary ops, something like this:
+class AbstractSdfShape {
+	virtual float distanceTo(vec&lt;float,3&gt;&amp; pnt)=0;
+	//… more virtual methods, depending on what we want to do.
+};
+This is a pretty straightforward approach, with some benefits and some downsides.
+on first glance, its short, and you can use a pointer to a base class as T to get runtime polymorphism for the items at hand. As a downside however, its easy to create a tree in which you could have a binary op (lets say - subtract) with more or less than 2 children, which to me seems ill-formed. also, all your polymorphism is done via a virtual interface, which I’m not opposed to in general, (and compilers now de-virtualize things?) but still I’d like to try an approach with some other goals in mind:</p>
+<ol>
+  <li>I’d prefer to not have to alter the interface of the SDF shapes to add new functionality.</li>
+  <li>runtime polymorphism is a must, however I’d like to try to avoid virtual interfaces, purely as an exercise in exploring alternatives.</li>
+  <li>I’d like this to be fairly easy to add both new functionality, and new shapes / sdf operations.</li>
+  <li>I’d like it to be impossible (compile time error) to produce ill-formed trees, but also it seems important to me to keep the math-y parts somewhat separate from the tree parts…</li>
+  <li>I’d like the code to be fairly compact.</li>
+</ol>
+
+<p>With those goals in mind - I’ve gone with std::variant as my pointer-to-base-class alternative. How does it work? well it works a lot like the V-table in a virtual class, except its not built into the language. There are reports that as a result, it can be a bit slow, depending on how many potential values are stored in the variant.
+With all the above in mind, lets take a look at what I actually created. All the code is on github, and before we dive in, I’ll explain some other choices I made:</p>
+<ol>
+  <li>C++20 modules! This is one of my favorite new features of c++, so of course I had to try it out. As far as I can tell, its working great!</li>
+  <li>Visual Studio 2022 &amp; Windows 10 - yup, this is my comfort zone. I’ve made a very sloppy OpenGL Win32 app, purely as a playground for these ideas. I should mention also that VS2022 has really great support for C++20.</li>
+  <li>Im using my own immutable vec3 library as a submodule, as well as the brilliant IMGUI.
+Ok sidebar over, on to the code!</li>
+</ol>
+
+<h2 id="the-sdf--math-part">The SDF / Math part</h2>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>// SDFBOX.IXX
+
+module;
+// we use macros in .ixx modules to privately conjoin some compile-time strings
+// anything included or #defined between 'module' and 'export module sdfBox'
+// will not leak to our importers!
+#define UI_NAME "box"
+#include "guiDef.h"
+#include &lt;string&gt;
+#define SNAME UI_NAME
+#define SDEF "struct " SNAME " {vec3 dim;};"
+#define FNAME "sdfBox"
+#define FNBODY R"(
+	vec3 d = abs(p)-self.dim;
+	vec3 z = vec3(0,0,0);
+	vec3 m = min(d,z);
+	return length(max(d,z)) + max(m.x,max(m.y,m.z));)"
+#define FNDEF decl_glslFunc(FNAME,SNAME,FNBODY);
+</code></pre></div></div>
+<p>So the first the we can see is a bunch of old-school preprocessor stuff in the global module fragment of our file, which is a module file. stuff here wont leak to our importers, which is nice! This section above includes a .h file full of macros, as well as some conjoined strings which form a little GLSL snippet that would evaluate this SDF of a box in that language.</p>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>export module sdfBox;
+import imvec;
+import string_helpers;
+export namespace SDF {
+		using namespace ivec;
+		template &lt;typename F&gt;
+		struct box {
+			ivec::vec&lt;F, 3&gt; dim;
+			box() : dim(vec&lt;F, 3&gt;(1, 1, 1)) {}
+			box(vec&lt;F, 3&gt; size) : dim(size) {}
+			
+		};
+		template &lt;typename F&gt;
+		F distanceTo(const box&lt;F&gt;&amp; self, const vec&lt;F, 3&gt;&amp; p) {
+			vec&lt;F, 3&gt; d = p.abs() - self.dim;
+			vec&lt;F, 3&gt; z(0, 0, 0);
+			return d.max(z).length() + d.min(z).maxComponent();
+		}
+</code></pre></div></div>
+<p>The above section exports a very simple <code>struct box</code>, which is defined by its size in X, Y, and Z. After that is a free function distanceTo which evaluates the signed distance between its first argument (a box) and a test point <code>p</code>. very straightforward! All SDF shapes must have a distanceTo function defined for them, with a similar signature. C++ will then very helpfully figure out which one to call via overload resolution - a brilliant form of static polymorphism.</p>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>		decl_uiName(box, UI_NAME)
+		decl_glslInterface(box, SNAME, SDEF, FNAME, FNDEF)
+		export template &lt;typename F&gt;
+			std::string glslLiteral(const box&lt;F&gt;&amp; self) {
+			return std::string(SNAME) + "(" + vecLiteral&lt;F, 3&gt;(self.dim) + ")";
+		}
+};
+</code></pre></div></div>
+<p>The final section above declares some more free functions, which support other parts of the interface - specifically a function which just return the UI name of this type “box” and the GLSL interface, which is used when we traverse a tree of these objects to generate a GLSL shader that would render that object. I find it nice that the GLSL definition is right next to the C++ equivalent, but of course these could be defined anywhere that makes you happy. Do note that <code>decl_uiName()</code> and <code>decl_glslInterface()</code> are macros defined in guiDef.h, and they hide the boilerplate of these repetitive free functions without polluting the global namespace. Lastly, <code>glslLiteral()</code> returns a non-compile-time string that would construct a box with a literal vec3 in GLSL.</p>
+
+<p>box.ixx is of course a module that defines the signed distance function to a box in 3D - lets take a look at a different SDF class:</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>// UNION.IXX
+module;
+#include &lt;string&gt;
+
+#define max(a,b) a &gt; b ? a : b
+#define min(a,b) a &lt; b ? a : b
+#include "guiDef.h"
+
+// "empty" is a magic word that lets our shader-builder visitor know its
+// safe to omit this parameter from the generated GLSL function 'sdfUnion'
+#define sName "empty"
+#define sDef ""
+#define fnName "sdfUnion"
+#define fnDef "float " fnName "(float a, float b) { return min(a, b); }"
+
+export module sdfUnion;
+import imvec;
+import string_helpers;
+export namespace SDF {
+	// 'union' is of course a keyword - blerg
+	template &lt;typename F&gt;
+	struct union_sdf {
+		// intentionally empty!
+	};
+</code></pre></div></div>
+<p>Union is the simplest binary SDF operator - simply returning the minimum distance between its two arguments. Like sdfBox, we must have a <code>struct union_sdf</code> even though its empty! this is because we’re relying on overload resolution to figure out what binary op to call! <code>sdfBinaryOp</code> is the meat here - we could have called it distanceTo, but it felt nicer to differentiate between shapes and binary operations on shapes with a name, even though they have a different signature.</p>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>	template &lt;typename F&gt;
+	inline F sdfBinaryOp(const union_sdf&lt;F&gt;&amp; i, F a, F b) {
+		return min(a, b);
+	}
+	decl_uiName(union_sdf, "union");
+	decl_glslInterface(union_sdf, sName, sDef, fnName, fnDef)
+	
+	export template &lt;typename F&gt;
+	std::string glslLiteral(const union_sdf&lt;F&gt;&amp; self) {
+		return std::string("");
+	}
+}
+</code></pre></div></div>
+
+<h2 id="the-tree-part">The Tree part</h2>
+<p>So We’ve seen two classes SDF functionality - a simple shape and the simplest binary operator. They all have an interface made of free functions, and our method of polymorphism is function overload resolution. We’re going to combine them using trees (for an example a binOp like union would have two children, while a shape like box must have none). There are at least 4 classes of these SDF operations, and it is a goal to allow a user of this library to add more with little effort:</p>
+<ol>
+  <li>Shapes like box, torus, sphere, etc.</li>
+  <li>binary operators (union, intersection, subtraction)</li>
+  <li>unary operators like round, shell, etc.</li>
+  <li>domain operators, like translate, rotate, repeat, etc.</li>
+</ol>
+
+<p>Each of the above classes has a distance function with a slightly different signature:</p>
+<ol>
+  <li>Shapes: F distanceTo(shape, point)</li>
+  <li>binary operators: F sdfBinaryOp(operatorData, dstA, dstB) //sometimes operator data is empty</li>
+  <li>unary operators: F sdfUnaryOp(operatorData, dstA)</li>
+  <li>domain operators: vec&lt;F,3&gt; transformDomain(operatorData, point P)</li>
+</ol>
+
+<p>Each of these signatures returns a distance, except for the domain operators, which fiddle with the test point. We can see also from this that we will need two layers of polymorphism - one abstracting the 4 classes above, and one for each of the 4 classes, each abstracting the different, specific shapes or operators in that class. In classic form, it might look like so: <br />
+<code>
+class INode {
+    //tree stuff
+};<br />
+class IShapeNode: public INode {
+    virtual distanceTo(...)=0;
+};<br />
+class IDomainNode: public INode  {
+    virtual transformDomain(...)=0;
+};<br />
+class IBinaryNode: public INode  {
+    virtual sdfBinaryOp(...)=0;
+};<br />
+class IUnaryNode: public INode  {
+    virtual sdfUnaryOp(...)=0;
+};
+</code></p>
+
+<p>However as allready states, we’ll be givving <code>std::variant</code> a spin! Hang on because this is where it gets confusing!</p>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>/// SDFNODE.IXX
+#include &lt;variant&gt;
+
+export template &lt;class... nodeVariants&gt;
+	class StructuredTree {
+	protected:
+		explicit StructuredTree() = delete;	// non-constructable class...
+	public:
+		using NodeVariant = std::variant&lt;nodeVariants...&gt;;
+		
+	};
+	export template &lt;class Var&gt;
+	class Node {
+	protected:
+		Var payload;
+		template &lt;typename V&gt; // todo require V to be assignable to Var
+		Node(V&amp;&amp; v) : payload(std::move(v)) {}
+		
+	public:
+		inline Var getPayload() const { return payload; }
+		inline void setPayload(Var p) { payload = p; }
+		//~Node() = default;
+	};
+</code></pre></div></div>
+<p>Ok, we’ve got a template parameter pack… and a Node class that is just a wrapper for its payload of type Var.
+Whats going on here? The template parameter pack is just immediately fed to a type alias <code>using NodeVariant = std::variant<nodeVariants...>;&lt;/code&gt;</nodeVariants...></code></p>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>export template &lt;class P, class GroupType&gt;
+	class BinOp : public Node&lt;P&gt; {
+		protected:
+			std::vector&lt;typename GroupType::NodeVariant&gt; children;
+		public:
+			// getters, etc... missing for brevity
+			
+	};
+</code></pre></div></div>
+<p>Ok here we can start to see whats going on - because this is a recursive type, we need a symbol to define the type of any possible node, which is tricky because we’re currently in the middle of defining a class of BinaryOp, and we haven’t even seen the others yet, nor forward declared them. We solve this by the template parameter GroupType, which is a stand-in for StructuredTree (you can see we refer to its sub-type here): <br /><code class="highlighter-rouge">std::vector&lt;typename GroupType::NodeVariant&gt; children;</code><br /></p>
+
+<p>However StructuredTree is itself templated, and its template argument pack must be the list of all the classes of SDF nodes! This somewhat circular template :sparkles: is often referred to as <a href="https://en.wikipedia.org/wiki/Curiously_recurring_template_pattern">CRTP</a>.</p>
+
+<p>Another point of note is the use of std::vector for storing children tree-nodes. Because <code class="highlighter-rouge">GroupType::NodeVariant</code> is incomplete, we need a container that can handle that - we could have also used a smart pointer - it really isn’t important, and we could of course change it at any time. Lets proceed to Unary ops, Domain Ops, and Shape (leaf) nodes:</p>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>	export template &lt;class P, class GroupType&gt;
+	class UnOp : public Node&lt;P&gt; {
+		protected:
+			std::vector&lt;typename GroupType::NodeVariant&gt; child;
+		public:
+			template &lt;typename V&gt;
+			explicit UnOp(V&amp;&amp; v, typename GroupType::NodeVariant&amp;&amp; subTree) : Node&lt;P&gt;(std::move(v)), child({ subTree }) {}
+			inline const typename GroupType::NodeVariant&amp; getChild() const { return child[0]; }
+			inline typename GroupType::NodeVariant&amp; getChild() { return child[0]; }
+			inline typename GroupType::NodeVariant&amp;&amp; takeChild() { return std::move(child[0]); }
+			inline void setChild(typename GroupType::NodeVariant&amp;&amp; node) {
+				child[0] = std::move(node);
+			}
+			
+	};
+	export template &lt;class P, class GroupType&gt;
+	class DomOp : public Node&lt;P&gt; {
+		protected:
+			std::vector&lt;typename GroupType::NodeVariant&gt; child;
+		public:
+			template &lt;typename V&gt;
+			explicit DomOp(V&amp;&amp; v, typename GroupType::NodeVariant&amp;&amp; subTree) : Node&lt;P&gt;(std::move(v)), child({ subTree }) {}
+			inline const typename GroupType::NodeVariant&amp; getChild() const { return child[0]; }
+			inline typename GroupType::NodeVariant&amp; getChild() { return child[0]; }
+			inline typename GroupType::NodeVariant&amp;&amp; takeChild() { return std::move(child[0]); }
+			inline void setChild(typename GroupType::NodeVariant&amp;&amp; node) {
+				child[0] = std::move(node);
+			}
+			
+	};
+	export template &lt;class P&gt;
+		class LeafOp : public Node&lt;P&gt; {
+		protected:
+		public:
+			template &lt;typename V&gt;
+			explicit LeafOp(V&amp;&amp; v) : Node&lt;P&gt;(std::move(v)) {}
+			
+	};
+</code></pre></div></div>
+<p>As you can see above, the pattern is much the same - each of the classes of node type has storage for children (except for the leaves aka shapes) and all of them have a template placeholder for the type of any node, as well as a template for the possible payloads. We do extend Node as a way of storing the payload, but nothing is virtual.</p>
+
+<p>In the next section, we wrap everything up by extending StructuredTree&lt;…&gt; thereby fulfilling the GroupType we pretended would exist above. We also make ‘nice’ type aliases for our various classes so we can maybe type less in the future. We leave ourselves room for extensibility by not yet defining all the binop/unaryOp/shape payloads, and by leaving in a final …OtherNodeClasses placeholder, for further extensibility.</p>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>	export template &lt;typename B, typename U, typename D, typename L, typename... OtherNodeClasses&gt;
+	class sdfTreeGroup : public StructuredTree&lt;
+		BinOp&lt;B, sdfTreeGroup&lt;B,U,D,L,OtherNodeClasses...&gt;&gt;,
+		UnOp&lt;U, sdfTreeGroup&lt;B, U, D, L, OtherNodeClasses...&gt;&gt;, 
+		DomOp&lt;D, sdfTreeGroup&lt;B, U, D, L, OtherNodeClasses...&gt;&gt;, 
+		LeafOp&lt;L&gt;, 
+		OtherNodeClasses...&gt; {
+		public:
+			// variants of payload, per node-class
+			using binVaraints = B;
+			using unaryVariants = U;
+			using domainVariants = D;
+			using leafVariants = L;
+
+			// node-classes
+			using BinaryOp = BinOp&lt;B, sdfTreeGroup&lt;B, U, D, L, OtherNodeClasses...&gt;&gt;;
+			using UnaryOp= UnOp&lt;U, sdfTreeGroup&lt;B, U, D, L, OtherNodeClasses...&gt;&gt;;
+			using DomainOp = DomOp&lt;D, sdfTreeGroup&lt;B, U, D, L, OtherNodeClasses...&gt;&gt;;
+			using Shape = LeafOp&lt;L&gt;;
+
+	};
+</code></pre></div></div>
+<p>Ok - the last part ties the generic stuff into an ‘implementation’ of this library:</p>
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>template &lt;typename F&gt;
+using binOpVariant = std::variant&lt;union_sdf&lt;F&gt;, smoothUnion&lt;F&gt;, intersect&lt;F&gt;, smoothIntersect&lt;F&gt;, subtract&lt;F&gt;, smoothSubtract&lt;F&gt;&gt;;
+
+
+template &lt;typename F&gt;
+using unaryOpVariant = std::variant&lt;round&lt;F&gt;&gt;;
+
+template &lt;typename F&gt;
+using domainOpVariant = std::variant&lt;move&lt;F&gt;, repeat&lt;F&gt;&gt;;
+
+template &lt;typename F&gt;
+using shapeVariant = std::variant&lt;cone&lt;F&gt;, box&lt;F&gt;, torus&lt;F&gt;, sphere&lt;F&gt;,capsule&lt;F&gt;,hexPrism&lt;F&gt;,cylinder&lt;F&gt;&gt;;
+
+using sdfNode = sdfTreeGroup&lt;binOpVariant&lt;float&gt;, unaryOpVariant&lt;float&gt;, domainOpVariant&lt;float&gt;, shapeVariant&lt;float&gt;&gt;;
+</code></pre></div></div>
+<p>SO - finally, we have the type of the tree - sdfNode! its got all the known payload types baked, in, and its pretty easy to add more!</p>
+<h2 id="but-this-seems-very-confusing-why-did-we-do-this-again">But… this seems very confusing! Why did we do this again?</h2>
+<p>Yes. I wont lie, this took me quite some time to write, and the error messages are not friendly! Its probably not more performant than a virtual interface, and that form will be much more familiar to many readers, which is no small benefit! What did we get for all this generic gibberish?</p>
+
+<ol>
+  <li>Its very loose coupling! The distance functions, the GLSL generation, all of it is free-function based! The tree stuff knows NOTHING of the math stuff, and vice-versa! This can make modification down the road very easy to isolate.</li>
+  <li>Compile errors - you will get them, but they can be quite unclear. I considered adding c++20 Concepts to the template parameters, however that did not improve the situation much - I dont think the VS2022 messages for these are finished baking.</li>
+  <li>Nothing is virtual - not a big win, and we still pay something for the runtime-polymorphism as we will see, but at least our objects pack well and there is minimal indirection.</li>
+</ol>
+
+<h2 id="the-visitors">The Visitors</h2>
+<p>Its hard to evalute this setup without looking at the actual use cases of these SDF trees. Because of the recursive stucture and decoupled interface, a visitor pattern makes clear sense. I’ve implemented a GUI visitor, which lets IMGui manipulate a tree, a GLSL shader generator visitor, and of course a distance visitor.</p>
+
+<div class="highlighter-rouge"><div class="highlight"><pre class="highlight"><code>///DistanceVisitor.ixx
+export template&lt;typename F, typename GroupType&gt;
+	F visitDistance(const typename GroupType::BinaryOp&amp; node, const ivec::vec&lt;F, 3&gt;&amp; p) {
+		// visit children first
+		F a = visitDistance&lt;F, GroupType&gt;(node.getLhs(), p);
+		F b = visitDistance&lt;F, GroupType&gt;(node.getRhs(), p);
+		return std::visit(
+			[a, b](const auto&amp; arg) {return sdfBinaryOp&lt;F&gt;(arg, a, b); }, node.getPayload());
+	}
+	export template&lt;typename F, typename GroupType&gt;
+	F visitDistance(const typename GroupType::Shape&amp; node, const ivec::vec&lt;F, 3&gt;&amp; p) {
+		return std::visit( // deduces arg-type for every variant of shape payload
+			[&amp;p](const auto&amp; arg) {return distanceTo&lt;F&gt;(arg, p); }, node.getPayload());
+	}
+	export template&lt;typename F, typename GroupType&gt;
+		F visitDistance(const typename GroupType::UnaryOp&amp; node, const ivec::vec&lt;F, 3&gt;&amp; p) {
+		F childDst = visitDistance&lt;F,GroupType&gt;(node.getChild(), p);
+		return std::visit( // note that unary ops mess with their child's distance value
+			[childDst](const auto&amp; arg) {return sdfUnaryOp&lt;F&gt;(arg, childDst); }, node.getPayload());
+	}
+	export template&lt;typename F, typename GroupType&gt;
+		F visitDistance(const typename GroupType::DomainOp&amp; node, const ivec::vec&lt;F, 3&gt;&amp; p) {
+		ivec::vec&lt;F, 3&gt; pnt = std::visit( // wheras domain ops mess with the given test-point p
+			[p](const auto&amp; arg) {return sdfDomainOp&lt;F&gt;(arg, p); }, node.getPayload());
+		return visitDistance&lt;F, GroupType&gt;(node.getChild(), pnt);
+	}
+	// IMPORTANT: DEFINERS OF VISITORS that use overload resolution
+	// must have the most generic version defined last - (or of course just declare all of them first before defining any)
+	export template&lt;typename F, typename GroupType&gt;
+	F visitDistance(const typename GroupType::NodeVariant&amp; node, const ivec::vec&lt;F, 3&gt;&amp; p) {
+		return std::visit( 
+			[&amp;p](const auto&amp; arg) {return visitDistance&lt;F, GroupType&gt;(arg, p); }, node);
+	}
+</code></pre></div></div>
+<p>Thats it! Nice and brief! Lets pick it apart:
+We’ve got a group of functions, which the compiler discriminates via overload resolution, one for the generic case and one for each of the 4 classes of node. At each point where we dont know which of the alternatives is held at runtime by an std::variant, we use std::visit() which always has just a single lambda with an auto-typed argument! this visit function is effectively taking the place of the v-table that would be in use in a virtual interface scenario - it internally associates keys with the alternatives types it could hold, and at runtime must evaluate that key to figure out the actual type. On the plus side, this is all hidden from us and we can just use a very pleasant auto lambda.</p>
+
+<p>This little pack of code lets us evaluate the distance from a point p to any compound SDF object represented by our tree. The GLSL shader generator visitor follows a similar, simple pattern. Rather than evaluate the distance functions, however, it instead collects strings that define the distance functions in GLSL, and composes a them into the GLSL code that would evaluate them. This snippet is then injected into a simple GLSL host that marches rays through the scene, and renders the results.</p>
+
+<h1 id="conclusion">Conclusion</h1>
+<p>Although it was more than a little confusing to make, I think this approach achieved the goals. Although its non-conventional form is I think in conflict with the goal that loose coupling implies - that it be easily changed / maintained. It is is pretty flexible, once you get the hang of it, and it was fun to play around with some new ideas - intentionally keeping functions free, making good use of the power of templates, not to mention the novel (to me) method of rendering shapes via SDF! the technique has a lot of interesting benefits and drawbacks vs. your average array of indices and vertices!
+One last thought this experiment left me with - I feel like c++20 modules revitalize the C++ preprocessor, rather than making it obsolete! It is with good reason that #defining all kinds of wild <code class="highlighter-rouge">__DANGER_SYMBOLS__</code> is not in vogue these days, but by keeping them private in each module, I actually think its made them a much more viable option for code preprocessing!</p>
+
+<p>I’ll leave you with a short, underwhelming video of the app in action, and of course all the code is available in full on <a href="https://github.com/froyo-np/steply">github</a>.<br />
+<img src="/docs/_images/viewer.m4v" alt="video of sdf viewer &amp; editor" /></p>
+
+  </div>
+
+</article>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">FROYO</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col footer-col-1">
+        <ul class="contact-list">
+          <li>FROYO</li>
+          <li><a href="mailto:nshepar@gmail.com">nshepar@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col footer-col-2">
+        <ul class="social-media-list">
+          
+
+          
+        </ul>
+      </div>
+
+      <div class="footer-col footer-col-3">
+        <p>A simple blog about various experiments in C++, Typescript, Rendering.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+  </body>
+
+</html>
