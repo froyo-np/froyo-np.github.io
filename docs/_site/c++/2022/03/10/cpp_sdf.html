@@ -66,7 +66,7 @@
   </header>
 
   <div class="post-content" itemprop="articleBody">
-    <p><img src="/docs/_images/sdf_header.jpg" alt="shapes rendered via sdf" /></p>
+    <p><img src="/assets/images/sdf_header.jpg" alt="img" /></p>
 <h1 id="hello-signed-distance-functions">Hello Signed Distance Functions</h1>
 
 <p>As mentioned in the previous post, I’ve implemented a little SDF (signed distance field) shape rendering library using some new(er) features of c++20. I’m gonna walk through some of the decisions I made for this one, as there are a lot of decisions I made along the way that were a bit outside of my comfort zone.</p>
@@ -414,7 +414,7 @@ We’ve got a group of functions, which the compiler discriminates via overload 
 One last thought this experiment left me with - I feel like c++20 modules revitalize the C++ preprocessor, rather than making it obsolete! It is with good reason that #defining all kinds of wild <code class="highlighter-rouge">__DANGER_SYMBOLS__</code> is not in vogue these days, but by keeping them private in each module, I actually think its made them a much more viable option for code preprocessing!</p>
 
 <p>I’ll leave you with a short, underwhelming video of the app in action, and of course all the code is available in full on <a href="https://github.com/froyo-np/steply">github</a>.<br />
-<img src="/docs/_images/viewer.m4v" alt="video of sdf viewer &amp; editor" /></p>
+<img src="/assets/images/viewer.gif" alt="video of sdf viewer &amp; editor" /></p>
 
   </div>
 
